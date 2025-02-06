@@ -820,25 +820,28 @@ generated quantities {
 
 # ===== GP time series model combining kernel ==== 
 
-
 # Set seed for reproducibility
 set.seed(123)
 
 # Number of months (2 years)
-N <- 24
+M <- 24
 
-# Time points (1, 2, ..., 24)
-t <- 1:N
+# Number of observations per month (e.g., daily data)
+obs_per_month <- 10
+
+# Total number of observations
+N <- M * obs_per_month
+
+# Month index for each observation
+month <- rep(1:M, each = obs_per_month)
 
 # Period (12 months)
 period <- 12
 
 # True parameters
-sigma_f_periodic_true <- 1.0  #// Signal standard deviation for the periodic component
-length_scale_periodic_true <- 1.0 #  // Length scale for the periodic component
-sigma_f_se_true <- 0.5  # // Signal standard deviation for the squared exponential component
-length_scale_se_true <- 10.0 #  // Length scale for the squared exponential component
-sigma_true <- 0.1  # // Noise standard deviation
+sigma_f_true <- 1.0  #// Signal standard deviation for the GP
+length_scale_true <- 1.0  #// Length scale for the GP
+sigma_true <- 0.1  #// Noise standard deviation
 
 # Periodic kernel function
 periodic_kernel <- function(t1, t2, sigma_f, length_scale, period) {
@@ -847,95 +850,70 @@ periodic_kernel <- function(t1, t2, sigma_f, length_scale, period) {
   sigma_f^2 * exp(-2 * sin(pi * periodic_distance / period)^2 / length_scale^2)
 }
 
-# Squared exponential kernel function
-se_kernel <- function(t1, t2, sigma_f, length_scale) {
-  sigma_f^2 * exp(-0.5 * (t1 - t2)^2 / length_scale^2)
-}
-
-# Generate the covariance matrices
-K_periodic <- matrix(0, N, N)
-K_se <- matrix(0, N, N)
-for (i in 1:N) {
-  for (j in 1:N) {
-    K_periodic[i, j] <- periodic_kernel(t[i], t[j], sigma_f_periodic_true, length_scale_periodic_true, period)
-    K_se[i, j] <- se_kernel(t[i], t[j], sigma_f_se_true, length_scale_se_true)
+# Generate the covariance matrix
+K <- matrix(0, M, M)
+for (i in 1:(M-1)) {
+  for (j in (i+1):M) {
+    K[i, j] <- periodic_kernel(i, j, sigma_f_true, length_scale_true, period)
+    K[j, i] <- K[i, j];
   }
+  K[i, i] <- sigma_f_true^2 + 1e-9;
 }
-
-# Combine the covariance matrices
-K <- K_periodic + K_se
-
-# Add a small value to the diagonal for numerical stability
-K <- K + diag(1e-9, N)
+K[M, M] <- sigma_f_true^2 + 1e-9;
 
 # Simulate latent GP values
-f_true <- MASS::mvrnorm(1, rep(0, N), K)
+f_true <- MASS::mvrnorm(1, rep(0, M), K)
 
 # Simulate observed weather data with noise
-y <- f_true + rnorm(N, 0, sigma_true)
+y <- f_true[month] + rnorm(N, 0, sigma_true)
 
 # Plot the simulated data
-ggplot(data.frame(t = t, y = y, f_true = f_true), aes(x = t)) +
+ggplot(data.frame(t = 1:N, y = y, f_true = f_true[month], month = as.factor(month)), aes(x = t, y = y, color = month)) +
   geom_line(aes(y = f_true), color = "blue", linetype = "dashed", size = 1) +
-  geom_point(aes(y = y), color = "red", size = 2) +
-  labs(title = "Simulated Monthly Weather Data for Two Consecutive Years",
+  geom_point(size = 2) +
+  labs(title = "Simulated Monthly Weather Data",
        x = "Time (t)",
-       y = "Observed Weather (y)") +
+       y = "Observed Weather (y)",
+       color = "Month") +
   theme_minimal()
 
 
 cat(file = 'GP_time_series_EG5.stan', 
     '
     data {
-  int<lower=1> N;              // Number of months (e.g., 24 for 2 years)
-  vector[N] t;                 // Time points (e.g., 1, 2, ..., 24)
+  int<lower=1> N;              // Total number of observations
+  int<lower=1> M;              // Number of months
+  array[N] int month;          // Month index for each observation (1, 2, ..., M)
   vector[N] y;                 // Observed weather data (e.g., temperature)
   real<lower=0> period;        // Period of the circular time (e.g., 12 for monthly data)
 }
 
 parameters {
   real<lower=0> sigma;         // Standard deviation of the noise
-  real<lower=0> length_scale_periodic;  // Length scale for the periodic component
-  real<lower=0> sigma_f_periodic;       // Signal standard deviation for the periodic component
-  real<lower=0> length_scale_se;        // Length scale for the squared exponential component
-  real<lower=0> sigma_f_se;             // Signal standard deviation for the squared exponential component
-  vector[N] eta;               // Latent variables for the GP
+  real<lower=0> length_scale;  // Length scale for the GP
+  real<lower=0> sigma_f;       // Signal standard deviation for the GP
+  vector[M] eta;               // Latent variables for the GP
 }
 
 transformed parameters {
-  vector[N] f;  // Latent GP function values
+  vector[M] f;  // Latent GP function values (monthly trends)
   {
-    matrix[N, N] K_periodic;  // Covariance matrix for the periodic component
-    matrix[N, N] K_se;        // Covariance matrix for the squared exponential component
-    matrix[N, N] K;           // Combined covariance matrix
-    matrix[N, N] L_K;         // Cholesky decomposition of the combined covariance matrix
+    matrix[M, M] K;  // Covariance matrix for the GP
+    matrix[M, M] L_K;  // Cholesky decomposition of the covariance matrix
 
-    // Construct the periodic covariance matrix
-    for (i in 1:(N-1)) {
-      for (j in (i+1):N) {
-        real distance = abs(t[i] - t[j]);
+    // Construct the covariance matrix using the periodic kernel
+    for (i in 1:(M-1)) {
+      for (j in (i+1):M) {
+        real distance = abs(i - j);
         real periodic_distance = fmin(distance, period - distance); // Handle circularity
-        K_periodic[i, j] = sigma_f_periodic^2 * exp(-2 * square(sin(pi() * periodic_distance / period)) / square(length_scale_periodic));
-        K_periodic[j, i] = K_periodic[i, j];
+        K[i, j] = sigma_f^2 * exp(-2 * square(sin(pi() * periodic_distance / period)) / square(length_scale));
+        K[j, i] = K[i, j];
       }
-      K_periodic[i, i] = sigma_f_periodic^2 + 1e-9;  // Add a small value to the diagonal for numerical stability
+      K[i, i] = sigma_f^2 + 1e-9;  // Add a small value to the diagonal for numerical stability
     }
-    K_periodic[N, N] = sigma_f_periodic^2 + 1e-9;
+    K[M, M] = sigma_f^2 + 1e-9;
 
-    // Construct the squared exponential covariance matrix
-    for (i in 1:(N-1)) {
-      for (j in (i+1):N) {
-        K_se[i, j] = sigma_f_se^2 * exp(-0.5 * square(t[i] - t[j]) / square(length_scale_se));
-        K_se[j, i] = K_se[i, j];
-      }
-      K_se[i, i] = sigma_f_se^2 + 1e-9;
-    }
-    K_se[N, N] = sigma_f_se^2 + 1e-9;
-
-    // Combine the two covariance matrices
-    K = K_periodic + K_se;
-
-    // Perform Cholesky decomposition of the combined covariance matrix
+    // Perform Cholesky decomposition of the covariance matrix
     L_K = cholesky_decompose(K);
 
     // Transform the latent variables `eta` into the GP values `f`
@@ -946,28 +924,27 @@ transformed parameters {
 model {
   // Priors for the parameters
   sigma ~ cauchy(0, 1);  // Cauchy prior for the noise standard deviation
-  length_scale_periodic ~ inv_gamma(5, 5);  // Inverse gamma prior for the periodic length scale
-  sigma_f_periodic ~ cauchy(0, 1);  // Cauchy prior for the periodic signal standard deviation
-  length_scale_se ~ inv_gamma(5, 5);  // Inverse gamma prior for the squared exponential length scale
-  sigma_f_se ~ cauchy(0, 1);  // Cauchy prior for the squared exponential signal standard deviation
+  length_scale ~ inv_gamma(5, 5);  // Inverse gamma prior for the length scale
+  sigma_f ~ cauchy(0, 1);  // Cauchy prior for the signal standard deviation
   eta ~ normal(0, 1);  // Standard normal prior for the latent variables
 
-  // Likelihood: observed data `y` is normally distributed around the GP values `f`
-  y ~ normal(f, sigma);
+  // Likelihood: observed data `y` is normally distributed around the GP values `f[month]`
+  y ~ normal(f[month], sigma);
 }
 
 generated quantities {
   vector[N] y_pred;  // Vector to store predictions for the observed data points
   for (n in 1:N) {
-    // Generate predictions by sampling from a normal distribution centered at `f[n]` with standard deviation `sigma`
-    y_pred[n] = normal_rng(f[n], sigma);
+    // Generate predictions by sampling from a normal distribution centered at `f[month[n]]` with standard deviation `sigma`
+    y_pred[n] = normal_rng(f[month[n]], sigma);
   }
 }
     ')
 
 stan_data <- list(
   N = N,
-  t = t,
+  M = M,
+  month = month,
   y = y,
   period = period
 )
@@ -1009,7 +986,7 @@ pred <-
              
              mu <- rnorm(1e3, mu, post$sigma[[1]])
              
-             tibble(x = stan_data$t[x], 
+             tibble(x = x, 
                     li = quantile(mu, 0.025), 
                     ls = quantile(mu, 0.975))
              
@@ -1017,16 +994,16 @@ pred <-
 
 pred <- do.call('rbind', pred)
 
-d <- data.frame(t = t, y = y, f_true = f_true)
+d <- data.frame(t = 1:N, y = y, f_true = f_true[month], month = as.factor(month))
 
 ggplot() +
-  geom_ribbon(data = pred, 
-              aes(x, ymin = li, ymax = ls), alpha = 0.3) +
+  geom_ribbon(data = pred, aes(x, ymin = li, ymax = ls), alpha = 0.3) +
   geom_line(data = d, aes(x = t, y = f_true), color = "blue", linetype = "dashed", size = 1) +
-  geom_point(data = d, aes(x = t, y = y), color = "red", size = 2) +
-  labs(title = "Simulated Monthly Weather Data for Two Consecutive Years",
+  geom_point(data = d, aes(t, y), size = 2) +
+  labs(title = "Simulated Monthly Weather Data",
        x = "Time (t)",
-       y = "Observed Weather (y)") +
+       y = "Observed Weather (y)",
+       color = "Month") +
   theme_minimal()
 
 

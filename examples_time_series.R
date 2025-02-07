@@ -631,10 +631,6 @@ ggplot() +
 
 # ======= GP time series model to forecasting =====
 
-# Load necessary libraries
-library(rstan)
-library(ggplot2)
-
 # Set seed for reproducibility
 set.seed(123)
 
@@ -817,8 +813,220 @@ generated quantities {
     '
     )
 
-
 # ===== GP time series model combining kernel ==== 
+
+cat(file = 'GP_time_series_EG5.stan', 
+    '
+    data {
+  int<lower=1> N;              // Number of months (e.g., 24 for 2 years)
+  vector[N] t;                 // Time points (e.g., 1, 2, ..., 24)
+  vector[N] y;                 // Observed weather data (e.g., temperature)
+  real<lower=0> period;        // Period of the circular time (e.g., 12 for monthly data)
+}
+
+parameters {
+  real<lower=0> sigma;         // Standard deviation of the noise
+  real<lower=0> length_scale_periodic;  // Length scale for the periodic component
+  real<lower=0> sigma_f_periodic;       // Signal standard deviation for the periodic component
+  real<lower=0> length_scale_se;        // Length scale for the squared exponential component
+  real<lower=0> sigma_f_se;             // Signal standard deviation for the squared exponential component
+  vector[N] eta;               // Latent variables for the GP
+}
+
+transformed parameters {
+  vector[N] f;  // Latent GP function values
+  {
+    matrix[N, N] K_periodic;  // Covariance matrix for the periodic component
+    matrix[N, N] K_se;        // Covariance matrix for the squared exponential component
+    matrix[N, N] K;           // Combined covariance matrix
+    matrix[N, N] L_K;         // Cholesky decomposition of the combined covariance matrix
+
+    // Construct the periodic covariance matrix
+    for (i in 1:(N-1)) {
+      for (j in (i+1):N) {
+        real distance = abs(t[i] - t[j]);
+        real periodic_distance = fmin(distance, period - distance); // Handle circularity
+        K_periodic[i, j] = sigma_f_periodic^2 * exp(-2 * square(sin(pi() * periodic_distance / period)) / square(length_scale_periodic));
+        K_periodic[j, i] = K_periodic[i, j];
+      }
+      K_periodic[i, i] = sigma_f_periodic^2 + 1e-9;  // Add a small value to the diagonal for numerical stability
+    }
+    K_periodic[N, N] = sigma_f_periodic^2 + 1e-9;
+
+    // Construct the squared exponential covariance matrix
+    for (i in 1:(N-1)) {
+      for (j in (i+1):N) {
+        K_se[i, j] = sigma_f_se^2 * exp(-0.5 * square(t[i] - t[j]) / square(length_scale_se));
+        K_se[j, i] = K_se[i, j];
+      }
+      K_se[i, i] = sigma_f_se^2 + 1e-9;
+    }
+    K_se[N, N] = sigma_f_se^2 + 1e-9;
+
+    // Combine the two covariance matrices
+    K = K_periodic + K_se;
+
+    // Perform Cholesky decomposition of the combined covariance matrix
+    L_K = cholesky_decompose(K);
+
+    // Transform the latent variables `eta` into the GP values `f`
+    f = L_K * eta;
+  }
+}
+
+model {
+  // Priors for the parameters
+  sigma ~ cauchy(0, 1);  // Cauchy prior for the noise standard deviation
+  length_scale_periodic ~ inv_gamma(5, 5);  // Inverse gamma prior for the periodic length scale
+  sigma_f_periodic ~ cauchy(0, 1);  // Cauchy prior for the periodic signal standard deviation
+  length_scale_se ~ inv_gamma(5, 5);  // Inverse gamma prior for the squared exponential length scale
+  sigma_f_se ~ cauchy(0, 1);  // Cauchy prior for the squared exponential signal standard deviation
+  eta ~ normal(0, 1);  // Standard normal prior for the latent variables
+
+  // Likelihood: observed data `y` is normally distributed around the GP values `f`
+  y ~ normal(f, sigma);
+}
+
+generated quantities {
+  vector[N] y_pred;  // Vector to store predictions for the observed data points
+  for (n in 1:N) {
+    // Generate predictions by sampling from a normal distribution centered at `f[n]` with standard deviation `sigma`
+    y_pred[n] = normal_rng(f[n], sigma);
+  }
+}
+    ')
+
+
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Number of months (2 years)
+N <- 24
+
+# Time points (1, 2, ..., 24)
+t <- 1:N
+
+# Period (12 months)
+period <- 12
+
+# True parameters
+sigma_f_periodic_true <- 1.0 # // Signal standard deviation for the periodic component
+length_scale_periodic_true <- 1.0  #// Length scale for the periodic component
+sigma_f_se_true <- 0.5  #// Signal standard deviation for the squared exponential component
+length_scale_se_true <- 10.0  #// Length scale for the squared exponential component
+sigma_true <- 0.1  # // Noise standard deviation
+
+# Periodic kernel function
+periodic_kernel <- function(t1, t2, sigma_f, length_scale, period) {
+  distance <- abs(t1 - t2)
+  periodic_distance <- pmin(distance, period - distance)
+  sigma_f^2 * exp(-2 * sin(pi * periodic_distance / period)^2 / length_scale^2)
+}
+
+# Squared exponential kernel function
+se_kernel <- function(t1, t2, sigma_f, length_scale) {
+  sigma_f^2 * exp(-0.5 * (t1 - t2)^2 / length_scale^2)
+}
+
+# Generate the covariance matrices
+K_periodic <- matrix(0, N, N)
+K_se <- matrix(0, N, N)
+for (i in 1:N) {
+  for (j in 1:N) {
+    K_periodic[i, j] <- periodic_kernel(t[i], t[j], sigma_f_periodic_true, length_scale_periodic_true, period)
+    K_se[i, j] <- se_kernel(t[i], t[j], sigma_f_se_true, length_scale_se_true)
+  }
+}
+
+# Combine the covariance matrices
+K <- K_periodic + K_se
+
+# Add a small value to the diagonal for numerical stability
+K <- K + diag(1e-9, N)
+
+# Simulate latent GP values
+f_true <- MASS::mvrnorm(1, rep(0, N), K)
+
+# Simulate observed weather data with noise
+y <- f_true + rnorm(N, 0, sigma_true)
+
+# Plot the simulated data
+ggplot(data.frame(t = t, y = y, f_true = f_true), aes(x = t)) +
+  geom_line(aes(y = f_true), color = "blue", linetype = "dashed", size = 1) +
+  geom_point(aes(y = y), color = "red", size = 2) +
+  labs(title = "Simulated Monthly Weather Data for Two Consecutive Years",
+       x = "Time (t)",
+       y = "Observed Weather (y)") +
+  theme_minimal()
+
+
+
+file <- paste0(getwd(), '/GP_time_series_EG5.stan')
+
+fit <- cmdstan_model(file, compile = T)
+
+
+stan_data <- list(
+  N = N,
+  t = t,
+  y = y,
+  period = period
+)
+
+
+mod <- 
+  fit$sample(
+    data = stan_data, 
+    iter_sampling = 2000, 
+    iter_warmup = 1000, 
+    thin = 10, 
+    chains = 5, 
+    parallel_chains = 5,
+    seed = 123
+  )
+
+mod$summary() |> print(n = 200)
+
+pred <- mod$draws('y_pred', format = 'df')
+
+pred <- pred[, grep('y_pred', colnames(pred))]
+
+pred <- 
+  do.call('rbind', 
+          lapply(seq_along(pred), FUN = 
+                   function(x) {
+                     tibble(x = x, 
+                            li = quantile(pred[[x]], 0.025), 
+                            ls = quantile(pred[[x]], 0.975))
+                   }))
+
+d <- data.frame(t = t, y = y, f_true = f_true)
+
+ggplot() +
+  geom_ribbon(data = pred, aes(x, ymin = li, ymax = ls), alpha = 0.3) +
+  geom_line(data = d, aes(x = t, y = f_true), color = "blue", linetype = "dashed", size = 1) +
+  geom_point(data = d, aes(x = t, y = y), color = "red", size = 2) +
+  labs(title = "Simulated Monthly Weather Data for Two Consecutive Years",
+       x = "Time (t)",
+       y = "Observed Weather (y)") +
+  theme_minimal()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ====== GP ===
 
 # Set seed for reproducibility
 set.seed(123)
@@ -974,17 +1182,16 @@ post <-
   list(f = post[, grep('f', colnames(post))], 
        sigma = post[, grep('sigma', colnames(post))])
 
+
+pred_y <- mod$draws('y_pred', format = 'df')
+
+pred_y <- pred_y[, grep('y_pred', colnames(pred_y))]
+
 pred <- 
-  lapply(seq_along(post$f), FUN = 
+  lapply(seq_along(pred_y), FUN = 
            function(x) {
              
-             mu <- 
-               with(post, 
-                    {
-                      f[[x]] 
-                    })
-             
-             mu <- rnorm(1e3, mu, post$sigma[[1]])
+             mu <- pred_y[[x]]
              
              tibble(x = x, 
                     li = quantile(mu, 0.025), 

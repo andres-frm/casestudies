@@ -359,7 +359,6 @@ mod <-
 
 sum <- mod$summary()
 
-
 post <- mod$draws(c('f', 'sigma'), format = 'df')
 
 post <- 

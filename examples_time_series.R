@@ -17,7 +17,7 @@ set.seed(123)
 N <- 50
 
 # Time points
-t <- sort(runif(N, 0, 10))
+t <- sort(runif(N, 0, 12))
 
 # Additional predictor
 x <- rnorm(N, mean = 0, sd = 1)
@@ -55,11 +55,19 @@ ggplot(data.frame(t = t, y = y, f_true = f_true, x = x), aes(x = t)) +
   geom_line(aes(y = f_true), color = "blue", linetype = "dashed", linewidth = 1) +
   geom_point(aes(y = y, color = x), size = 2) +
   scale_color_gradient(low = "red", high = "green") +
-  labs(title = "Simulated Data with Additional Predictor",
-       x = "Time (t)",
-       y = "Observed Value (y)",
-       color = "Predictor (x)") +
-  theme_minimal()
+  labs(x = "Month",
+       y = "Network nestedness",
+       color = "Functional space") +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 10),
+        axis.title = element_text(size = 15), 
+        legend.position = 'top')
+
+plot(x, y, xlab = 'Hypervolume', ylab = 'Cluestering', 
+     col = 'lightblue', pch = 16, 
+     cex.lab = 1.5)
+abline(coef = c(-0.7, 0.5), lty = 3, col = 'tan1', lwd = 2)
+
 
 stan_data <- list(
   N = N,

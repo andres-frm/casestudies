@@ -53,12 +53,12 @@ y <- f_true + beta_true * x + rnorm(N, 0, sigma_true)
 # Plot the simulated data
 ggplot(data.frame(t = t, y = y, f_true = f_true, x = x), aes(x = t)) +
   geom_line(aes(y = f_true), color = "blue", linetype = "dashed", linewidth = 1) +
-  geom_point(aes(y = y, color = x), size = 2) +
-  scale_color_gradient(low = "red", high = "green") +
+  geom_point(aes(y = y), size = 2) +
   labs(x = "Month",
        y = "Network nestedness",
        color = "Functional space") +
-  theme_minimal() +
+  theme_classic() +
+  scale_x_continuous(breaks = 1:12) +
   theme(axis.text = element_text(size = 10),
         axis.title = element_text(size = 15), 
         legend.position = 'top')
@@ -909,7 +909,7 @@ generated quantities {
 set.seed(123)
 
 # Number of months (2 years)
-N <- 24
+N <- 36
 
 # Time points (1, 2, ..., 24)
 t <- 1:N
@@ -1014,9 +1014,8 @@ ggplot() +
   geom_ribbon(data = pred, aes(x, ymin = li, ymax = ls), alpha = 0.3) +
   geom_line(data = d, aes(x = t, y = f_true), color = "blue", linetype = "dashed", size = 1) +
   geom_point(data = d, aes(x = t, y = y), color = "red", size = 2) +
-  labs(title = "Simulated Monthly Weather Data for Two Consecutive Years",
-       x = "Time (t)",
-       y = "Observed Weather (y)") +
+  labs(x = "Time",
+       y = "Network structure") +
   theme_minimal()
 
 
